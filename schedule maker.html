@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>JU Class Schedule Generator</title>
+  <style>
+    body {
+      background-color: #000;
+      color: #FFD700;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+    }
+    h1, h2 {
+      text-align: center;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: #1a1a1a;
+      border-radius: 10px;
+      box-shadow: 0 0 15px rgba(255, 215, 0, 0.5);
+    }
+    input[type="file"],
+    button,
+    select,
+    input[type="text"] {
+      display: block;
+      margin: 10px auto;
+      background-color: #FFD700;
+      color: #000;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+    }
+    input[type="text"] {
+      background-color: #262626;
+      color: #FFD700;
+      border: 1px solid #FFD700;
+      width: 100%;
+      max-width: 300px;
+      font-weight: normal;
+      margin: 5px auto;
+    }
+    label {
+      display: block;
+      text-align: center;
+      margin-top: 15px;
+    }
+    .hidden {
+      display: none;
+    }
+    .schedule-block {
+      margin: 20px 0;
+      padding: 10px;
+      border: 1px solid #FFD700;
+      border-radius: 5px;
+    }
+    .schedule-block h3 {
+      margin: 0 0 10px;
+      color: #FFD700;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0;
+    }
+    th, td {
+      border: 1px solid #FFD700;
+      padding: 8px;
+      text-align: center;
+    }
+    th {
+      background-color: #FFD700;
+      color: #000;
+    }
+    td {
+      background-color: #262626;
+    }
+  </style>
+  <!-- PapaParse CDN for CSV parsing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>JU Class Schedule Generator</h1>
+
+    <!-- STEP 1: Upload your freshly exported CSV -->
+    <input type="file" id="csvFile" accept=".csv" />
+
+    <!-- STEP 2: Preferences Form (hidden until CSV loads) -->
+    <div id="prefsForm" class="hidden">
+      <label for="numCourses">How many courses do you want to take? (1–4)</label>
+      <select id="numCourses">
+        <option value="" disabled selected>Select number of courses</option>
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+      </select>
+
+      <!-- Dynamically-generated inputs for each course code -->
+      <div id="courseCodesContainer"></div>
+
+      <label for="pinnedCourse">Pin a specific course to its slot (optional)</label>
+      <input type="text" id="pinnedCourse" placeholder="Enter a course code or leave blank" />
+
+      <label for="preferredTeachers">Preferred teacher codes (comma-separated, optional)</label>
+      <input type="text" id="preferredTeachers" placeholder="E.g. SNK,SB" />
+
+      <button id="submitPrefs">Generate Schedule</button>
+    </div>
+
+    <!-- STEP 3: Where we’ll show your schedule results -->
+    <div id="output"></div>
+  </div>
+
+  <script>
+    // 1) Holds the raw PapaParse output (array of row‐objects)
+    let scheduleDataRaw = [];
+    // 2) Holds our “flattened” array of { Course Code, Teacher, Slot, Room }
+    let scheduleData = [];
+
+    // Utility to normalize any code: trim, collapse all extra spaces, uppercase
+    function normalizeCode(str) {
+      return str.trim().replace(/\s+/g, ' ').toUpperCase();
+    }
+
+    // Get references to our HTML elements
+    const csvInput               = document.getElementById('csvFile');
+    const prefsForm              = document.getElementById('prefsForm');
+    const numCoursesSelect       = document.getElementById('numCourses');
+    const courseCodesContainer   = document.getElementById('courseCodesContainer');
+    const pinnedCourseInput      = document.getElementById('pinnedCourse');
+    const preferredTeachersInput = document.getElementById('preferredTeachers');
+    const submitPrefsBtn         = document.getElementById('submitPrefs');
+    const outputDiv              = document.getElementById('output');
+
+    // STEP 1: When a CSV is chosen, parse it
+    csvInput.addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: function(results) {
+          // 1a) Save the raw row‐array
+          scheduleDataRaw = results.data;
+          // 1b) Immediately flatten it into scheduleData[]
+          flattenScheduleData();
+          // Show that flattening in your console so you can verify “PMSCS 624P” really is in there:
+          console.log("Flattened scheduleData:", scheduleData);
+          alert("✅ CSV loaded and parsed successfully!");
+          prefsForm.classList.remove('hidden');
+        }
+      });
+    });
+
+    // Takes scheduleDataRaw[] and turns each “Room # + time-slot columns” into items
+    function flattenScheduleData() {
+      scheduleData = [];
+      if (!scheduleDataRaw.length) return;
+
+      // 1) Find which header begins with “room” (case-insensitive)
+      const headers = Object.keys(scheduleDataRaw[0]);
+      let roomKey = headers.find(h => h.trim().toLowerCase().startsWith('room'));
+      if (!roomKey) {
+        console.error("⚠️ No column beginning with 'Room' found in CSV headers.");
+        alert("⚠️ Error: Could not find a 'Room' column in the CSV.");
+        return;
+      }
+
+      // 2) Everything else is treated as a “slot” column
+      const slotCols = headers.filter(h => h !== roomKey);
+
+      // 3) For each row, for each slot column, if cell has “COURSE CODE (TEACHER)”, extract them
+      scheduleDataRaw.forEach(row => {
+        const rawRoom = row[roomKey] || "";
+        const room = normalizeCode(rawRoom);
+
+        slotCols.forEach(slot => {
+          const cell = (row[slot] || "").trim();
+          if (!cell) return;
+          // Expect “PMSCS 624P (JKD)”
+          const match = cell.match(/^(.*?)\s*\((.*?)\)/);
+          if (match) {
+            const rawCourse = match[1];
+            const rawTeacher = match[2];
+            const course = normalizeCode(rawCourse);
+            const teacher = normalizeCode(rawTeacher);
+            scheduleData.push({
+              "Course Code": course,
+              "Teacher":     teacher,
+              "Slot":        slot.trim(),
+              "Room":        room
+            });
+          }
+        });
+      });
+    }
+
+    // STEP 2A: When user picks “1–4 courses,” dynamically show that many text inputs
+    numCoursesSelect.addEventListener('change', function() {
+      const n = parseInt(this.value);
+      courseCodesContainer.innerHTML = "";
+      for (let i = 1; i <= n; i++) {
+        const input = document.createElement('input');
+        input.type = "text";
+        input.id   = "courseCode" + i;
+        input.placeholder = "Course code " + i;
+        courseCodesContainer.appendChild(input);
+      }
+    });
+
+    // STEP 2B: On “Generate Schedule,” read the user’s preferences and build all valid combos
+    submitPrefsBtn.addEventListener('click', function() {
+      outputDiv.innerHTML = "";
+
+      // (1) How many courses?
+      const numCourses = parseInt(numCoursesSelect.value);
+      if (isNaN(numCourses) || numCourses < 1 || numCourses > 4) {
+        alert("Please select a number between 1 and 4.");
+        return;
+      }
+
+      // (2) Read each course code from the dynamically created inputs, normalize them
+      const courseCodes = [];
+      for (let i = 1; i <= numCourses; i++) {
+        const el = document.getElementById("courseCode" + i);
+        if (!el || !el.value.trim()) {
+          alert(`Please enter a valid Course Code for item ${i}.`);
+          return;
+        }
+        courseCodes.push(normalizeCode(el.value));
+      }
+
+      // (3) “Pinned course” (optional)
+      const pinnedCourse = normalizeCode(pinnedCourseInput.value);
+
+      // (4) Preferred teachers (optional)
+      const preferredTeachers = preferredTeachersInput.value
+                                .split(',')
+                                .map(t => normalizeCode(t))
+                                .filter(t => t);
+
+      // (5) Filter scheduleData so that only rows whose Course Code ∈ courseCodes remain
+      let filtered = scheduleData.filter(item =>
+        courseCodes.includes(item["Course Code"])
+      );
+
+      // (6) Immediately verify each chosen course is actually found
+      for (const c of courseCodes) {
+        if (!filtered.some(item => item["Course Code"] === c)) {
+          outputDiv.innerHTML = `<h2>No valid schedules: course “${c}” not found in CSV.</h2>`;
+          return;
+        }
+      }
+
+      // (7) Group by course code
+      const grouped = {};
+      courseCodes.forEach(c => {
+        grouped[c] = filtered.filter(item => item["Course Code"] === c);
+      });
+
+      // (8) Build all combinations of one entry per course, then remove those with slot-conflicts
+      const allCombos = [];
+      function backtrack(i, combo) {
+        if (i === courseCodes.length) {
+          // Check that no two entries share the same “Slot”:
+          const slots = combo.map(e => e.Slot);
+          if (new Set(slots).size === slots.length) {
+            allCombos.push(combo.slice());
+          }
+          return;
+        }
+        const code = courseCodes[i];
+        grouped[code].forEach(entry => {
+          combo.push(entry);
+          backtrack(i + 1, combo);
+          combo.pop();
+        });
+      }
+      backtrack(0, []);
+
+      // (9) If no valid combos remain, show a message
+      if (allCombos.length === 0) {
+        outputDiv.innerHTML = "<h2>No valid schedules found (time-slot conflicts).</h2>";
+        return;
+      }
+
+      // (10) Sort by number of preferred-teacher matches (descending):
+      allCombos.sort((A, B) => {
+        const scoreA = A.reduce((sum, e) =>
+          sum + (preferredTeachers.includes(e.Teacher) ? 1 : 0), 0
+        );
+        const scoreB = B.reduce((sum, e) =>
+          sum + (preferredTeachers.includes(e.Teacher) ? 1 : 0), 0
+        );
+        return scoreB - scoreA;
+      });
+
+      // (11) Render each valid combo as its own “Schedule Option” block
+      allCombos.forEach((combo, idx) => {
+        const block = document.createElement('div');
+        block.className = "schedule-block";
+
+        const title = document.createElement('h3');
+        title.textContent = `Valid Schedule Option ${idx + 1}`;
+        block.appendChild(title);
+
+        // Build a small table: Course Code | Teacher | Slot | Room
+        let tbl = "<table><thead><tr>";
+        ["Course Code", "Teacher", "Slot", "Room"].forEach(h => {
+          tbl += `<th>${h}</th>`;
+        });
+        tbl += "</tr></thead><tbody>";
+
+        combo.forEach(entry => {
+          tbl += "<tr>";
+          ["Course Code", "Teacher", "Slot", "Room"].forEach(k => {
+            tbl += `<td>${entry[k] || ""}</td>`;
+          });
+          tbl += "</tr>";
+        });
+
+        tbl += "</tbody></table>";
+        block.innerHTML += tbl;
+        outputDiv.appendChild(block);
+      });
+    });
+  </script>
+</body>
+</html>
